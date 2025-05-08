@@ -102,6 +102,109 @@ codebase-mcp start
 
 This will start the MCP server in stdio mode, which can be used by any MCP-compatible clients.
 
+---
+
+## Ignoring Files and Folders from Indexing
+
+You can create a file named `.codebaseignore` at the root of your project to specify files and folders that should be ignored during codebase indexing by the MCP. The format is similar to `.gitignore`. This ensures that sensitive, large, or irrelevant files are not processed.
+
+Example usage:
+```
+node_modules/
+dist/
+*.log
+.env
+```
+
+---
+
+
+## Installation and Usage in Cline (VS Code)
+
+### Manual Installation
+
+1. **Clone the repository and install dependencies:**
+   ```bash
+   git clone https://github.com/HellFiveOsborn/codebase-mcp.git
+   cd codebase-mcp
+   npm install
+   npm run build
+   ```
+
+2. **Add the MCP server configuration to the Cline settings file:**
+
+   Open the `cline_mcp_settings.json` file or access it via "Configure MCP Servers" in the Cline interface.
+
+   Add the following block:
+   ```json
+   {
+     "mcpServers": {
+       "codebase-mcp": {
+         "type": "stdio",
+         "command": "node",
+         "args": ["dist/cli.js", "start"]
+       }
+     }
+   }
+   ```
+
+   > **Important:**  
+   > - The `"command"` field must be `"node"` and the arguments should point to `"dist/cli.js", "start"`.
+   > - Make sure to run `npm run build` before starting the MCP.
+
+3. **Restart Cline or use the restart button in the MCP Servers interface.**
+
+### Installation via Cline Interface
+
+1. Open VS Code and click the Cline icon in the sidebar.
+2. Go to "MCP Servers" > "Installed" > "Configure MCP Servers".
+3. Add the configuration block above.
+4. Save and restart the MCP server.
+
+### Testing the Installation
+
+After configuration, ask Cline to execute the `getCodebase` tool:
+- Example:  
+  > "@codebase get the current codebase using the MCP."
+
+The output will be a clean summary of the codebase, including main statistics.
+
+### Troubleshooting
+
+- If you see a "command not found" error, make sure Node.js is installed and available in your PATH.
+- Ensure the `dist/` directory and the `dist/cli.js` file exist (run `npm run build`).
+- Use only the flags supported by [RepoMix](https://github.com/yamadashy/repomix) (see `npx repomix --help`).
+
+### Note for Cline AI
+
+> This MCP server must be configured with:
+> - `"command": "node"`
+> - `"args": ["dist/cli.js", "start"]`
+> - `"type": "stdio"`
+> 
+> Do not use `"npx"` or `"codebase-mcp"` directly in the `"command"` field.
+
+---
+
+## Mandatory Instructional Prompt for AI
+
+To ensure proper functionality of this MCP with AI agents (such as Cline, Cursor, Claude, etc.), add the following instructional prompt to the `.clinerules`, `.cursorrules` file, or directly into the AI system prompt. You may concatenate it with your existing prompt:
+
+```
+Whenever the input contains '@codebase', use the 'codebase-mcp' MCP to index and analyze the project. Perform the analysis directly, without explanations or additional comments. Return the result in XML format only.
+
+After indexing, do not immediately execute the user's request. First, analyze the intent: determine whether the user is asking a question or requesting a code change (creation/modification).
+
+Then, identify the most relevant file(s) mentioned or implied in the request. Use the `searchCodebase` tool to retrieve contextual snippets from the indexed codebase file (e.g., {NAME}.codebase).
+
+- If the user asked a question, return an answer based only on the retrieved context.
+- If the user requested a creation or modification, use the retrieved context to accurately implement the requested changes directly in the actual project file(s), not in the codebase index.
+
+Only proceed with execution after fully understanding the request and retrieving the necessary context. All actions must be guided by relevance and consistency with the project’s structure.
+```
+
+---
+
 ## License
 
 MIT

@@ -1,4 +1,17 @@
 #!/usr/bin/env node
+
+/**
+ * MCP Alias: @codebase
+ *
+ * This MCP server is designed to respond to natural language commands prefixed with `@codebase`,
+ * even if the server is registered as "codebase-mcp" in the MCP servers configuration.
+ *
+ * Example usage:
+ *   @codebase analyze and summarize the project
+ *   @codebase get a codebase overview
+ *
+ * The AI should route any `@codebase ...` command to this MCP server.
+ */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -9,8 +22,23 @@ import fs from "fs";
 // Create MCP server
 const server = new McpServer({
   name: "codebase-mcp",
-  version: "1.0.0",
+  version: "1.0.1",
 });
+
+/**
+* Reads and processes the .codebaseignore file in the given directory.
+* Returns a comma-separated string of glob patterns, or undefined if the file does not exist.
+*/
+function getCodebaseIgnoreGlobs(workingDir: string): string | undefined {
+  const ignorePath = path.join(workingDir, ".codebaseignore");
+  if (!fs.existsSync(ignorePath)) return undefined;
+  const lines = fs.readFileSync(ignorePath, "utf8")
+    .split("\n")
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith("#"));
+  if (lines.length === 0) return undefined;
+  return lines.join(",");
+}
 
 // Define the 'getCodebase' tool
 server.tool(
@@ -32,66 +60,111 @@ server.tool(
       // Prepare options for Repomix
       const workingDir = cwd || process.cwd();
       
-      let command = "npx repomix --output stdout";
-      
-      // Add formatting options
+      let command = "npx repomix --output project.codebase";
+
+      // Add only valid formatting options
       if (format) {
         command += ` --style ${format}`;
       }
-      
-      if (includeFileSummary === true) {
-        command += ` --include-file-summary`;
-      } else if (includeFileSummary === false) {
-        command += ` --no-include-file-summary`;
-      }
-      
-      if (includeDirectoryStructure === true) {
-        command += ` --include-directory-structure`;
-      } else if (includeDirectoryStructure === false) {
-        command += ` --no-include-directory-structure`;
-      }
-      
       if (removeComments === true) {
         command += ` --remove-comments`;
-      } else if (removeComments === false) {
-        command += ` --no-remove-comments`;
       }
-      
       if (removeEmptyLines === true) {
         command += ` --remove-empty-lines`;
-      } else if (removeEmptyLines === false) {
-        command += ` --no-remove-empty-lines`;
       }
-      
       if (showLineNumbers === true) {
-        command += ` --show-line-numbers`;
-      } else if (showLineNumbers === false) {
-        command += ` --no-show-line-numbers`;
+        command += ` --output-show-line-numbers`;
       }
-      
+      // Only add --no-file-summary if user explicitly disables it
+      if (includeFileSummary === false) {
+        command += ` --no-file-summary`;
+      }
+      // Only add --no-directory-structure if user explicitly disables it
+      if (includeDirectoryStructure === false) {
+        command += ` --no-directory-structure`;
+      }
       if (includePatterns) {
         command += ` --include "${includePatterns}"`;
       }
-      
-      if (ignorePatterns) {
-        command += ` --ignore "${ignorePatterns}"`;
+      // Logic for .codebaseignore
+      const ignoreFromFile = getCodebaseIgnoreGlobs(workingDir);
+      let combinedIgnore: string | undefined;
+      if (ignorePatterns && ignoreFromFile) {
+        combinedIgnore = `${ignorePatterns},${ignoreFromFile}`;
+      } else if (ignorePatterns) {
+        combinedIgnore = ignorePatterns;
+      } else if (ignoreFromFile) {
+        combinedIgnore = ignoreFromFile;
+      }
+      if (combinedIgnore) {
+        command += ` --ignore "${combinedIgnore}"`;
       }
 
       console.error(`Running command: ${command}`);
-      
+
       // Run Repomix to dump the codebase
       const output = execSync(command, {
         cwd: workingDir,
         maxBuffer: 1024 * 1024 * 50, // 50MB buffer for large codebases
       }).toString();
 
+      // Filter Repomix banners and promotional messages
+      let filtered = output;
+      filtered = filtered
+        .split('\n')
+        .filter(line =>
+          !line.includes('Repomix is now available') &&
+          !line.includes('https://repomix.com') &&
+          !line.toLowerCase().includes('repomix') &&
+          !line.includes('Pack your codebase into AI-friendly formats')
+        )
+        .join('\n')
+        .trim();
+
+      // Extract directory structure if present
+      let directoryStructure = "";
+      const dirStart = filtered.match(/Directory Structure:?/i);
+      if (dirStart) {
+        const idx = filtered.indexOf(dirStart[0]);
+        // Goes to the next block (e.g. "Pack Summary" or "Total Files" or end)
+        let endIdx = filtered.length;
+        const summaryIdx = filtered.indexOf("Pack Summary", idx + 1);
+        const totalFilesIdx = filtered.indexOf("Total Files", idx + 1);
+        if (summaryIdx !== -1 && summaryIdx > idx) endIdx = Math.min(endIdx, summaryIdx);
+        if (totalFilesIdx !== -1 && totalFilesIdx > idx) endIdx = Math.min(endIdx, totalFilesIdx);
+        directoryStructure = filtered.slice(idx + dirStart[0].length).trim();
+        if (endIdx !== filtered.length) {
+          directoryStructure = filtered.slice(idx + dirStart[0].length, endIdx).trim();
+        }
+      }
+
+      // Return only the summary block if it exists
+      let summaryBlock = filtered;
+      const summaryStart = filtered.match(/(Pack Summary:|Total Files:)/);
+      if (summaryStart) {
+        const idx = filtered.indexOf(summaryStart[0]);
+        summaryBlock = filtered.slice(idx).trim();
+      } else {
+        // fallback: last 20 lines
+        const lines = filtered.trim().split('\n');
+        summaryBlock = lines.slice(-20).join('\n');
+      }
+
+      // Assemble response with directory structure (if found)
+      const contentArr: { type: "text"; text: string }[] = [];
+      if (directoryStructure) {
+        contentArr.push({
+          type: "text" as const,
+          text: `<directory_structure>\n${directoryStructure}\n</directory_structure>`,
+        });
+      }
+      contentArr.push({
+        type: "text" as const,
+        text: summaryBlock,
+      });
+
       return {
-        content: [
-          {
-            type: "text",
-            text: output,
-          },
-        ],
+        content: contentArr,
       };
     } catch (error: unknown) {
       console.error("Error running Repomix:", error);
@@ -124,7 +197,7 @@ server.tool(
   },
   async ({ repo, format, includeFileSummary, includeDirectoryStructure, removeComments, removeEmptyLines, showLineNumbers, includePatterns, ignorePatterns }) => {
     try {
-      let command = `npx repomix --remote ${repo} --output stdout`;
+      let command = `npx repomix --remote ${repo} --output remote.codebase`;
       
       // Add formatting options
       if (format) {
@@ -165,10 +238,6 @@ server.tool(
         command += ` --include "${includePatterns}"`;
       }
       
-      if (ignorePatterns) {
-        command += ` --ignore "${ignorePatterns}"`;
-      }
-
       console.error(`Running command: ${command}`);
       
       // Run Repomix to dump the codebase
@@ -261,8 +330,18 @@ server.tool(
         command += ` --include "${includePatterns}"`;
       }
       
-      if (ignorePatterns) {
-        command += ` --ignore "${ignorePatterns}"`;
+      // Logic for .codebaseignore
+      const ignoreFromFile = getCodebaseIgnoreGlobs(workingDir);
+      let combinedIgnore: string | undefined;
+      if (ignorePatterns && ignoreFromFile) {
+        combinedIgnore = `${ignorePatterns},${ignoreFromFile}`;
+      } else if (ignorePatterns) {
+        combinedIgnore = ignorePatterns;
+      } else if (ignoreFromFile) {
+        combinedIgnore = ignoreFromFile;
+      }
+      if (combinedIgnore) {
+        command += ` --ignore "${combinedIgnore}"`;
       }
 
       console.error(`Running command: ${command}`);
@@ -310,6 +389,130 @@ server.tool(
   }
 );
 
+/**
+ * Tool: searchCodebase
+ * Performs a simple text search in the saved codebase file (e.g., project.codebase) and returns relevant snippets.
+ */
+server.tool(
+  "searchCodebase",
+  "Returns the content of a specific file from the codebase, with line numbers, for easy navigation.",
+  {
+    file: z.string().describe("Relative path of the file to extract (e.g. src/cli.ts)"),
+    codebase: z.string().describe("Codebase file to search").default("project.codebase").optional(),
+    maxLines: z.number().describe("Maximum number of lines to return").default(40).optional(),
+  },
+  async ({ file, codebase, maxLines }) => {
+    try {
+      const codebaseFile = codebase || "project.codebase";
+      if (!fs.existsSync(codebaseFile)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Codebase file not found: ${codebaseFile}`,
+            },
+          ],
+        };
+      }
+      if (!file) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Parameter 'file' is required.`,
+            },
+          ],
+        };
+      }
+      const raw = fs.readFileSync(codebaseFile, "utf8");
+      const lines = raw.split("\n");
+      let currentFile: { path: string; content: string[] } | null = null;
+      const fileBlocks: { path: string; content: string[] }[] = [];
+
+      // Parse file blocks: supports both <file path="..."> and # File: ...
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        // <file path="...">
+        const xmlMatch = line.match(/^<file path="(.+?)">$/);
+        if (xmlMatch) {
+          if (currentFile) fileBlocks.push(currentFile);
+          currentFile = { path: xmlMatch[1].trim(), content: [] };
+          continue;
+        }
+        // # File: ...
+        const hashMatch = line.match(/^# File: (.+)$/);
+        if (hashMatch) {
+          if (currentFile) fileBlocks.push(currentFile);
+          currentFile = { path: hashMatch[1].trim(), content: [] };
+          continue;
+        }
+        // </file> close XML block
+        if (line.match(/^<\/file>$/)) {
+          if (currentFile) fileBlocks.push(currentFile);
+          currentFile = null;
+          continue;
+        }
+        if (currentFile) {
+          currentFile.content.push(line);
+        }
+      }
+      if (currentFile) fileBlocks.push(currentFile);
+
+      // Normalize paths for comparison
+      function normalizePath(p: string) {
+        return p.replace(/^\.\//, "").replace(/\\/g, "/").trim();
+      }
+      const requested = normalizePath(file);
+
+      // Find the requested file (case-sensitive and case-insensitive fallback)
+      let found = fileBlocks.find(
+        f => normalizePath(f.path) === requested
+      );
+      if (!found) {
+        found = fileBlocks.find(
+          f => normalizePath(f.path).toLowerCase() === requested.toLowerCase()
+        );
+      }
+      if (!found) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `File "${file}" not found in codebase.`,
+            },
+          ],
+        };
+      }
+
+      // Limit lines
+      const maxL = maxLines ?? 40;
+      const snippetLines = found.content.slice(0, maxL);
+      let snippet = "";
+      for (let i = 0; i < snippetLines.length; i++) {
+        snippet += ` ${i + 1}: ${snippetLines[i]}\n`;
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `<file path="${found.path}">\n${snippet.trim()}\n</file>`,
+          },
+        ],
+      };
+    } catch (error: unknown) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error while extracting file: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+      };
+    }
+  }
+);
+
 // Start the server
 async function main() {
   const transport = new StdioServerTransport();
@@ -317,4 +520,4 @@ async function main() {
   console.error("Codebase MCP Server running on stdio");
 }
 
-main().catch(console.error); 
+main().catch(console.error);
